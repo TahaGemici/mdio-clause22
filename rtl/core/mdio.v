@@ -1,19 +1,26 @@
-module mdio_clause22 #(parameter CLK_MHZ = 100) (
+module mdio (
     input clk,
     input arst_n,
 
+    input[31:0] prescaler,
+    input mode, // 0: clause22, 1: clause45
+    
     input start,
-    input[9:0] addr, // {phy_addr[4:0], reg_addr[4:0]}
-    input[15:0] wr_data,
-    input write,
-
     output reg done,
+
+    input[11:0] conf, // {op, phy_addr, reg/dev_addr}
+    input[15:0] wr_data,
     output reg[15:0] rd_data,
 
     output mdc,
     inout mdio // add pull-up resistor if needed
 );
-    clk_div #(.DIV_FACTOR(CLK_MHZ)) mdc_init (.clk_in(clk), .arst_n(arst_n), .clk_out(mdc));
+    clk_div mdc_init (
+        .clk_in(clk),
+        .arst_n(arst_n),
+        .prescaler(prescaler),
+        .clk_out(mdc)
+    );
 
     reg mdio_out, mdio_out_nxt, done_nxt;
     assign mdio = mdio_out ? 1'bz : 1'b0;
@@ -27,13 +34,11 @@ module mdio_clause22 #(parameter CLK_MHZ = 100) (
             state <= 0;
             counter <= 0;
             mdio_out <= 1'b1;
-            rd_data <= 16'd0;
         end else begin
             done <= done_nxt;
             state <= state_nxt;
             counter <= counter_nxt;
             mdio_out <= mdio_out_nxt;
-            rd_data <= rd_data_nxt;
         end
     end
     always @(posedge mdc or negedge arst_n) begin
@@ -47,15 +52,14 @@ module mdio_clause22 #(parameter CLK_MHZ = 100) (
     localparam IDLE       = 3'd0;
     localparam PREAMBLE   = 3'd1;
     localparam START      = 3'd2;
-    localparam OP         = 3'd3;
-    localparam ADDR       = 3'd4;
-    localparam TURNAROUND = 3'd5;
-    localparam DATA       = 3'd6;
-    localparam DONE       = 3'd7;
+    localparam CONF       = 3'd3;
+    localparam TURNAROUND = 3'd4;
+    localparam DATA       = 3'd5;
+    localparam DONE       = 3'd6;
     always @* begin
         done_nxt = done;
         state_nxt = state;
-        counter_nxt = counter + 1;
+        counter_nxt = counter - 1;
         mdio_out_nxt = 1'b1;
         rd_data_nxt = rd_data;
         case(state)
@@ -67,42 +71,53 @@ module mdio_clause22 #(parameter CLK_MHZ = 100) (
                 end
             end
             PREAMBLE: begin
-                if(counter == 31) begin
+                if(counter == 1) begin
                     state_nxt = START;
                 end
             end
             START: begin
-                mdio_out_nxt = counter[0];
-                state_nxt = counter[0] ? OP : state;
+                mdio_out_nxt = counter[0] & (~mode);
+                if(counter[0]) begin
+                    state_nxt = CONF;
+                    counter_nxt = 11;
+                end
             end
-            OP: begin
-                mdio_out_nxt = write ? counter[0] : (~counter[0]);
-                state_nxt = counter[0] ? ADDR : state;
-            end
-            ADDR: begin
-                mdio_out_nxt = addr[13 - counter];
-                if(counter == 13) begin
+    input mode, // 0: clause22, 1: clause45
+    
+    input start,
+    output reg done,
+
+    input[11:0] conf, // {op, phy_addr, reg/dev_addr}
+    input[15:0] wr_data,
+    output reg[15:0] rd_data,
+            CONF: begin
+                mdio_out_nxt = conf[counter];
+                if(counter == 0) begin
                     state_nxt = TURNAROUND;
-                    counter_nxt = write;
+                    counter_nxt = {4'h00, op[0]};
                 end
             end
             TURNAROUND: begin
-                if(write) begin
+                counter_nxt = counter + 1;
+                if(op[0]) begin
                     mdio_out_nxt = counter[0];
                 end
-                state_nxt = counter[1] ? DATA : state;
+                if(counter[1]) begin
+                    counter_nxt = 15;
+                    state_nxt = DATA;
+                end
             end
             DATA: begin
-                mdio_out_nxt = write ? wr_data[18 - counter] : 1'b1;
-                if(!write) begin
-                    rd_data_nxt[18 - counter] = mdio;
+                mdio_out_nxt = op[0] ? wr_data[counter] : 1'b1;
+                if(op[1]) begin
+                    rd_data_nxt[counter] = mdio;
                 end
-                if(counter == 18) begin
+                if(counter == 0) begin
                     state_nxt = DONE;
+                    done_nxt = 1'b1;
                 end
             end
-            DONE: begin
-                done_nxt = 1'b1;
+            DONE, default: begin
                 state_nxt = IDLE;
             end
         endcase
